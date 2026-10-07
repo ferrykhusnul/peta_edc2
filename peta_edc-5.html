@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EDC Distribution — BO Manna</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+:root{--blue:#00529C;--org:#F58220;--bg:#f4f6f9;--ink:#1b2430;--mut:#5d6b7a;--ok:#1a8f4c;--bad:#c0392b}
+*{box-sizing:border-box}body{margin:0;font:15px/1.4 system-ui,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:var(--blue);color:#fff;padding:14px 16px}
+h1{margin:0;font-size:20px}.asof{margin-top:4px;font-size:13px;opacity:.9}
+.wrap{max-width:1100px;margin:0 auto;padding:12px}
+.sum{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px}
+.sum div{background:#fff;border-radius:6px;padding:10px;border-left:4px solid var(--blue)}
+.sum b{display:block;font-size:24px}.sum span{font-size:12px;color:var(--mut)}
+.sum .a{border-color:var(--ok)}.sum .i{border-color:var(--bad)}.sum .k{border-color:var(--org)}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin-bottom:10px}
+label{font-size:12px;color:var(--mut);display:flex;flex-direction:column;gap:2px}
+select,input{font:inherit;padding:7px;border:1px solid #c5ced8;border-radius:5px;background:#fff}
+#map{height:60vh;min-height:360px;border-radius:6px;border:1px solid #c5ced8}
+.dq{padding:6px 10px;border-radius:5px;font-weight:600;font-size:13px;cursor:pointer;margin-left:auto}
+.dq.ok{background:#dff3e7;color:var(--ok)}.dq.err{background:#fbe0dc;color:var(--bad)}
+#errs{display:none;background:#fff;border:1px solid var(--bad);border-radius:6px;padding:8px 12px;margin-bottom:10px;max-height:160px;overflow:auto;font-size:13px}
+.leg{font-size:12px;color:var(--mut);margin-top:6px}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin:0 4px 0 8px}
+#msg{padding:30px;text-align:center;color:var(--mut)}
+@media(max-width:600px){.sum{grid-template-columns:1fr 1fr}}
+</style></head><body>
+<header><h1>EDC DISTRIBUTION — BO MANNA</h1><div class="asof" id="asof">DATA AS OF: -</div></header>
+<div class="wrap">
+<div class="sum"><div><b id="sT">0</b><span>Total EDC</span></div><div class="a"><b id="sA">0</b><span>Produktif</span></div><div class="i"><b id="sI">0</b><span>Non Produktif</span></div><div class="k"><b id="sK">0</b><span>Merchant (MID unik)</span></div></div>
+<div class="bar">
+<label id="lK" style="display:none">Kecamatan<select id="fK"></select></label>
+<label>Status<select id="fT"><option value="">Semua</option><option>Produktif</option><option>Non Produktif</option></select></label>
+<label>Cari merchant / MID / TID<input id="fQ" placeholder="ketik lalu tunggu"></label>
+<label>Ganti data (CSV)<input type="file" id="file" accept=".csv"></label>
+<span class="dq" id="dq"></span>
+</div>
+<div id="errs"></div>
+<div id="msg">Memuat master_edc.csv …</div>
+<div id="map" style="display:none"></div>
+<div class="leg" id="sM"></div>
+<div class="leg"><span class="dot" style="background:#1a8f4c"></span>Produktif<span class="dot" style="background:#c0392b"></span>Non Produktif</div>
+</div>
+<script>
+/* ===== PENGATURAN (jarang diubah) ===== */
+const CONFIG={csv:"master_edc.csv",status:["Produktif","Non Produktif"],
+  latRange:[-5.3,-3.6],lonRange:[102.0,104.0],center:[-4.46,102.93],zoom:11};
+const REQ=["NAMA_MERCHANT","MID","TID","ALAMAT","STATUS","LONGITUDE","LATITUDE"];
+let rows=[],errors=[],map,layer,asofDate=null;
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function parseCSV(t){
+  t=t.replace(/^\uFEFF/,"");
+  const f=t.split(/\r?\n/)[0],d=(f.split(";").length>f.split(",").length)?";":",";
+  const out=[];let r=[],c="",q=false;
+  for(let i=0;i<t.length;i++){const ch=t[i];
+    if(q){if(ch=='"'){if(t[i+1]=='"'){c+='"';i++}else q=false}else c+=ch}
+    else if(ch=='"')q=true;else if(ch==d){r.push(c);c=""}
+    else if(ch=="\n"||ch=="\r"){if(ch=="\r"&&t[i+1]=="\n")i++;r.push(c);out.push(r);r=[];c=""}
+    else c+=ch}
+  if(c!==""||r.length){r.push(c);out.push(r)}
+  const h=out.shift().map(x=>x.trim().toUpperCase().replace(/\s+/g,"_"));
+  return out.filter(x=>x.some(v=>v.trim()!="")).map((x,n)=>{const o={_line:n+2};h.forEach((k,i)=>o[k]=(x[i]||"").trim());return o});
+}
+function validate(data){
+  const e=[],seen={};
+  if(!data.length)return["File kosong atau tidak terbaca"];
+  const miss=REQ.filter(k=>!(k in data[0]));
+  if(miss.length)return["Kolom tidak ditemukan: "+miss.join(", ")+". Wajib: Nama Merchant, MID, TID, Alamat, Status, Longitude, Latitude"];
+  data.forEach(r=>{
+    const p="Baris "+r._line+" ("+(r.TID||"tanpa TID")+"): ";r._bad=false;
+    REQ.forEach(k=>{if(!r[k]&&k!="LONGITUDE"&&k!="LATITUDE"){e.push(p+k+" kosong");r._bad=true}});
+    r._nocoord=!r.LATITUDE&&!r.LONGITUDE;
+    if(!r._nocoord&&(!r.LATITUDE||!r.LONGITUDE)){e.push(p+"Longitude/Latitude harus terisi keduanya");r._bad=true}
+    if(r.TID){if(seen[r.TID]){e.push(p+"TID duplikat dengan baris "+seen[r.TID]);r._bad=true}else seen[r.TID]=r._line}
+    const s=CONFIG.status.find(x=>x.toLowerCase()==r.STATUS.replace(/\s+/g," ").toLowerCase());
+    if(r.STATUS&&!s){e.push(p+"Status harus Produktif / Non Produktif, bukan '"+r.STATUS+"'");r._bad=true}else r.STATUS=s||r.STATUS;
+    const la=+r.LATITUDE.replace(",","."),lo=+r.LONGITUDE.replace(",",".");
+    if(!r._nocoord&&r.LATITUDE&&r.LONGITUDE&&(isNaN(la)||isNaN(lo)||la<CONFIG.latRange[0]||la>CONFIG.latRange[1]||lo<CONFIG.lonRange[0]||lo>CONFIG.lonRange[1])){e.push(p+"koordinat tidak valid / di luar area (cek tanda minus, titik desimal, dan jangan tertukar Lat/Long)");r._bad=true}
+    r.la=la;r.lo=lo;
+  });
+  return e;
+}
+function load(text,date){
+  rows=parseCSV(text);errors=validate(rows);asofDate=date||null;
+  const dq=$("dq");dq.className="dq "+(errors.length?"err":"ok");
+  const nc=rows.filter(r=>!r._bad&&r._nocoord).length;
+  dq.textContent="Data Quality Check: "+(errors.length?"Error ("+errors.length+")":"OK")+(nc?" · "+nc+" belum ada koordinat":"");
+  const ks=[...new Set(rows.filter(r=>!r._bad&&r.KECAMATAN).map(r=>r.KECAMATAN))].sort();
+  $("lK").style.display=ks.length?"flex":"none";$("fK").innerHTML='<option value="">Semua</option>'+ks.map(v=>"<option>"+esc(v)+"</option>").join("");
+  $("errs").innerHTML=errors.length?"<b>Perbaiki di Excel/CSV, lalu muat ulang:</b><br>"+errors.map(esc).join("<br>"):"";
+  $("errs").style.display=errors.length?"block":"none";
+  $("msg").style.display="none";$("map").style.display="block";
+  if(!map){map=L.map("map").setView(CONFIG.center,CONFIG.zoom);
+    const o={maxZoom:18,attribution:"Tiles © Esri"},B="https://server.arcgisonline.com/ArcGIS/rest/services/",
+    j=L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"© OpenStreetMap contributors"}),
+    e=L.tileLayer(B+"World_Street_Map/MapServer/tile/{z}/{y}/{x}",o),s=L.tileLayer(B+"World_Imagery/MapServer/tile/{z}/{y}/{x}",o);
+    j.addTo(map);L.control.layers({"OpenStreetMap":j,"Jalan (Esri)":e,"Satelit (Esri)":s},null,{position:"topright"}).addTo(map);
+    layer=L.layerGroup().addTo(map)}
+  setTimeout(()=>map.invalidateSize(),50);draw(true);
+}
+function draw(fit){
+  const t=$("fT").value,kc=$("fK").value,q=$("fQ").value.trim().toLowerCase();
+  $("asof").textContent="DATA AS OF: "+(asofDate?asofDate.toLocaleDateString("id-ID",{day:"numeric",month:"long",year:"numeric"}):"-");
+  layer.clearLayers();let A=0,I=0,NC=0,m=new Set(),pts=[],seen={};
+  rows.filter(r=>!r._bad).forEach(r=>{
+    if(t&&r.STATUS!=t)return;
+    if(kc&&r.KECAMATAN!=kc)return;
+    if(q&&!(r.NAMA_MERCHANT+" "+r.MID+" "+r.TID+" "+r.ALAMAT).toLowerCase().includes(q))return;
+    const ok=r.STATUS=="Produktif";ok?A++:I++;m.add(r.MID);
+    if(r._nocoord){NC++;return}
+    const key=r.la.toFixed(5)+","+r.lo.toFixed(5),n=seen[key]=(seen[key]||0)+1,k2=n-1,ring=Math.floor(k2/8)+1,ang=k2*Math.PI/4;
+    const la=n>1?r.la+0.00009*ring*Math.sin(ang):r.la,lo=n>1?r.lo+0.00009*ring*Math.cos(ang):r.lo;
+    L.circleMarker([la,lo],{radius:7,color:"#fff",weight:1.5,fillColor:ok?"#1a8f4c":"#c0392b",fillOpacity:.95}).addTo(layer)
+     .bindPopup("<b>"+esc(r.NAMA_MERCHANT)+"</b><br>MID: "+esc(r.MID)+"<br>TID: "+esc(r.TID)+"<br>Alamat: "+esc(r.ALAMAT)+(r.KECAMATAN?"<br>Kecamatan: "+esc(r.KECAMATAN):"")+"<br>Status: "+esc(r.STATUS));
+    pts.push([la,lo]);
+  });
+  $("sM").textContent=NC?"Tampil di peta: "+(A+I-NC)+" dari "+(A+I)+" EDC ("+NC+" belum punya koordinat)":"";
+  $("sT").textContent=A+I;$("sA").textContent=A;$("sI").textContent=I;$("sK").textContent=m.size;
+  if(fit&&pts.length)map.fitBounds(pts,{padding:[30,30],maxZoom:14});
+}
+let tm;$("fT").onchange=$("fK").onchange=()=>draw(true);$("fQ").oninput=()=>{clearTimeout(tm);tm=setTimeout(()=>draw(true),400)};
+$("dq").onclick=()=>{if(errors.length)$("errs").style.display=$("errs").style.display=="block"?"none":"block"};
+$("file").onchange=e=>{const f=e.target.files[0];if(f)f.text().then(t=>load(t,new Date(f.lastModified)))};
+fetch(CONFIG.csv).then(r=>{if(!r.ok)throw 0;const lm=r.headers.get("Last-Modified");return r.text().then(t=>load(t,lm?new Date(lm):new Date()))}).catch(()=>{
+  $("msg").innerHTML="Pilih file data (CSV) pada kolom <b>Ganti data (CSV)</b> di atas untuk menampilkan peta."});
+</script></body></html>
